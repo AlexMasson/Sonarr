@@ -97,6 +97,83 @@ function DownloadClientOptions(props) {
                 {translate('RemoveDownloadsAlert')}
               </Alert>
             </FieldSet>
+
+            <FieldSet legend={translate('LlmPrioritization')}>
+              <Form>
+                <FormGroup
+                  advancedSettings={advancedSettings}
+                  isAdvanced={true}
+                  size={sizes.MEDIUM}
+                >
+                  <FormLabel>{translate('LlmApiUrl')}</FormLabel>
+
+                  <FormInputGroup
+                    type={inputTypes.TEXT}
+                    name="llmApiUrl"
+                    placeholder="https://api.openai.com/v1"
+                    helpText={translate('LlmApiUrlHelpText')}
+                    onChange={onInputChange}
+                    {...settings.llmApiUrl}
+                  />
+                </FormGroup>
+
+                <FormGroup
+                  advancedSettings={advancedSettings}
+                  isAdvanced={true}
+                  size={sizes.MEDIUM}
+                >
+                  <FormLabel>{translate('LlmApiKey')}</FormLabel>
+
+                  <FormInputGroup
+                    type={inputTypes.PASSWORD}
+                    name="llmApiKey"
+                    helpText={translate('LlmApiKeyHelpText')}
+                    onChange={onInputChange}
+                    {...settings.llmApiKey}
+                  />
+                </FormGroup>
+
+                <FormGroup
+                  advancedSettings={advancedSettings}
+                  isAdvanced={true}
+                  size={sizes.MEDIUM}
+                >
+                  <FormLabel>{translate('LlmModel')}</FormLabel>
+
+                  <FormInputGroup
+                    type={inputTypes.TEXT}
+                    name="llmModel"
+                    placeholder="gpt-4o"
+                    helpText={translate('LlmModelHelpText')}
+                    onChange={onInputChange}
+                    {...settings.llmModel}
+                  />
+                </FormGroup>
+
+                <FormGroup
+                  advancedSettings={advancedSettings}
+                  isAdvanced={true}
+                  size={sizes.MEDIUM}
+                >
+                  <FormLabel>{translate('LlmTimeout')}</FormLabel>
+
+                  <FormInputGroup
+                    type={inputTypes.NUMBER}
+                    name="llmTimeout"
+                    min={5}
+                    max={300}
+                    unit="seconds"
+                    helpText={translate('LlmTimeoutHelpText')}
+                    onChange={onInputChange}
+                    {...settings.llmTimeout}
+                  />
+                </FormGroup>
+              </Form>
+
+              <Alert kind={kinds.INFO}>
+                {translate('LlmPrioritizationHelpAlert')}
+              </Alert>
+            </FieldSet>
           </div>
       }
     </div>

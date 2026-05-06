@@ -390,6 +390,30 @@ namespace NzbDrone.Core.Configuration
 
         public string ApplicationUrl => GetValue("ApplicationUrl", string.Empty);
 
+        public string LlmApiUrl
+        {
+            get { return GetValue("LlmApiUrl", string.Empty); }
+            set { SetValue("LlmApiUrl", value); }
+        }
+
+        public string LlmApiKey
+        {
+            get { return GetValue("LlmApiKey", string.Empty); }
+            set { SetValue("LlmApiKey", value); }
+        }
+
+        public string LlmModel
+        {
+            get { return GetValue("LlmModel", string.Empty); }
+            set { SetValue("LlmModel", value); }
+        }
+
+        public int LlmTimeout
+        {
+            get { return GetValueInt("LlmTimeout", 30); }
+            set { SetValue("LlmTimeout", value); }
+        }
+
         public bool TrustCgnatIpAddresses
         {
             get { return GetValueBoolean("TrustCgnatIpAddresses", false); }
