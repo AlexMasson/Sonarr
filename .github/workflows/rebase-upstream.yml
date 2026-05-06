@@ -1,0 +1,47 @@
+name: Rebase on upstream
+
+on:
+  schedule:
+    # Every day at 04:00 UTC
+    - cron: '0 4 * * *'
+  workflow_dispatch:
+
+jobs:
+  rebase:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: feature/llm-prioritization
+          fetch-depth: 0
+          token: ${{ secrets.PAT }}
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Add upstream and rebase
+        id: rebase
+        run: |
+          git remote add upstream https://github.com/Sonarr/Sonarr.git || true
+          git fetch upstream main
+          BEFORE=$(git rev-parse HEAD)
+          git rebase upstream/main
+          AFTER=$(git rev-parse HEAD)
+          if [ "$BEFORE" != "$AFTER" ]; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Push (force with lease)
+        run: git push --force-with-lease origin feature/llm-prioritization
+
+      - name: Trigger Docker rebuild
+        if: steps.rebase.outputs.changed == 'true'
+        run: |
+          curl -X POST \
+            -H "Authorization: token ${{ secrets.PAT }}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            https://api.github.com/repos/${{ github.repository_owner }}/docker-sonarr/dispatches \
+            -d '{"event_type":"upstream-rebased"}'

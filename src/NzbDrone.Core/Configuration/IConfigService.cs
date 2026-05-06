@@ -94,5 +94,11 @@ namespace NzbDrone.Core.Configuration
 
         CertificateValidationType CertificateValidation { get; }
         string ApplicationUrl { get; }
+
+        // LLM Prioritization
+        string LlmApiUrl { get; set; }
+        string LlmApiKey { get; set; }
+        string LlmModel { get; set; }
+        int LlmTimeout { get; set; }
     }
 }
