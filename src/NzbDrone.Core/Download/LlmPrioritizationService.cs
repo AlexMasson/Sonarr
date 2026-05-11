@@ -1,8 +1,10 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Net.Http;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using NLog;
 using NzbDrone.Common.Extensions;
@@ -11,6 +13,7 @@ using NzbDrone.Common.Serializer;
 using NzbDrone.Core.Configuration;
 using NzbDrone.Core.DecisionEngine;
 using NzbDrone.Core.Parser.Model;
+using NzbDrone.Core.Profiles.Qualities;
 
 namespace NzbDrone.Core.Download
 {
@@ -22,12 +25,14 @@ namespace NzbDrone.Core.Download
     public class LlmPrioritizationService : ILlmPrioritizationService
     {
         private readonly IConfigService _configService;
+        private readonly IQualityProfileService _qualityProfileService;
         private readonly IHttpClient _httpClient;
         private readonly Logger _logger;
 
-        public LlmPrioritizationService(IConfigService configService, IHttpClient httpClient, Logger logger)
+        public LlmPrioritizationService(IConfigService configService, IQualityProfileService qualityProfileService, IHttpClient httpClient, Logger logger)
         {
             _configService = configService;
+            _qualityProfileService = qualityProfileService;
             _httpClient = httpClient;
             _logger = logger;
         }
@@ -55,6 +60,14 @@ namespace NzbDrone.Core.Download
                 var firstDecision = sorted.First();
                 var series = firstDecision.RemoteEpisode.Series;
                 var episodes = firstDecision.RemoteEpisode.Episodes;
+
+                var systemPrompt = GetSystemPromptForProfile(series.QualityProfileId);
+
+                if (systemPrompt.IsNullOrWhiteSpace())
+                {
+                    return sorted;
+                }
+
                 var prompt = BuildPrompt(series, episodes, sorted);
 
                 var payload = new
@@ -62,11 +75,15 @@ namespace NzbDrone.Core.Download
                     model = model,
                     messages = new[]
                     {
-                        new { role = "system", content = "You are a release selection assistant for Sonarr. Given a list of releases, pick the best one. Consider: quality, size, seeders, codec, release group reputation, language, custom format score. Return ONLY: {\"choice\": <1-based index>}" },
+                        new { role = "system", content = systemPrompt },
                         new { role = "user", content = prompt }
                     },
                     temperature = 0.0
                 };
+
+                _logger.Debug("LLM sending request for '{0}' (profile prompt: {1} chars, user prompt: {2} chars)",
+                    series.Title, systemPrompt.Length, prompt.Length);
+                _logger.Debug("LLM user prompt:\n{0}", prompt);
 
                 var request = new HttpRequestBuilder($"{url.TrimEnd('/')}/chat/completions")
                     .Accept(HttpAccept.Json)
@@ -84,6 +101,7 @@ namespace NzbDrone.Core.Download
                 request.RequestTimeout = TimeSpan.FromSeconds(timeout);
 
                 var response = await _httpClient.ExecuteAsync(request);
+                _logger.Debug("LLM raw response: {0}", response.Content);
                 var choice = ParseChoice(response.Content, sorted.Count);
 
                 if (choice.HasValue)
@@ -103,6 +121,38 @@ namespace NzbDrone.Core.Download
             {
                 _logger.Warn(ex, "LLM prioritization failed, using default priority");
                 return sorted;
+            }
+        }
+
+        private string GetSystemPromptForProfile(int qualityProfileId)
+        {
+            try
+            {
+                var profile = _qualityProfileService.Get(qualityProfileId);
+                var profileName = profile?.Name;
+
+                if (profileName.IsNullOrWhiteSpace())
+                {
+                    return null;
+                }
+
+                var safeName = Regex.Replace(profileName, @"[^\w\-]", "_");
+                var promptPath = Path.Combine("/config", "llm-prompts", safeName + ".txt");
+
+                if (!File.Exists(promptPath))
+                {
+                    _logger.Debug("No LLM prompt file for profile '{0}' (looked for {1}), skipping LLM", profileName, promptPath);
+                    return null;
+                }
+
+                var content = File.ReadAllText(promptPath).Trim();
+                _logger.Debug("Loaded LLM prompt for profile '{0}' from {1}", profileName, promptPath);
+                return content;
+            }
+            catch (Exception ex)
+            {
+                _logger.Warn(ex, "Failed to load LLM prompt for profile {0}", qualityProfileId);
+                return null;
             }
         }
 
