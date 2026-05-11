@@ -106,6 +106,12 @@ namespace NzbDrone.Core.Download
 
                 if (choice.HasValue)
                 {
+                    if (choice.Value == 0)
+                    {
+                        _logger.Info("LLM declined all releases (choice: 0) for '{0}', skipping download", series.Title);
+                        return new List<DownloadDecision>();
+                    }
+
                     var selected = sorted[choice.Value - 1];
                     _logger.Info("LLM selected release #{0}: {1}", choice.Value, selected.RemoteEpisode.Release.Title);
 
@@ -207,6 +213,11 @@ namespace NzbDrone.Core.Download
                 }
 
                 var choiceResponse = Json.Deserialize<LlmChoiceResult>(message);
+
+                if (choiceResponse?.Choice == 0)
+                {
+                    return 0; // LLM explicitly requests no download / no upgrade
+                }
 
                 if (choiceResponse?.Choice >= 1 && choiceResponse.Choice <= count)
                 {
