@@ -104,7 +104,23 @@ namespace NzbDrone.Core.Download
                         new { role = "system", content = systemPrompt },
                         new { role = "user", content = prompt }
                     },
-                    ["temperature"] = temperature
+                    ["temperature"] = temperature,
+                    ["response_format"] = new
+                    {
+                        type = "json_schema",
+                        json_schema = new
+                        {
+                            name = "release_choice",
+                            strict = true,
+                            schema = new
+                            {
+                                type = "object",
+                                properties = new { choice = new { type = "integer" } },
+                                required = new[] { "choice" },
+                                additionalProperties = false
+                            }
+                        }
+                    }
                 };
 
                 if (maxTokens > 0)
