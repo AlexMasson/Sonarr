@@ -16,6 +16,8 @@ namespace Sonarr.Api.V3.Config
         public string LlmApiKey { get; set; }
         public string LlmModel { get; set; }
         public int LlmTimeout { get; set; }
+        public int LlmMaxTokens { get; set; }
+        public double LlmTemperature { get; set; }
     }
 
     public static class DownloadClientConfigResourceMapper
@@ -34,7 +36,9 @@ namespace Sonarr.Api.V3.Config
                 LlmApiUrl = model.LlmApiUrl,
                 LlmApiKey = model.LlmApiKey,
                 LlmModel = model.LlmModel,
-                LlmTimeout = model.LlmTimeout
+                LlmTimeout = model.LlmTimeout,
+                LlmMaxTokens = model.LlmMaxTokens,
+                LlmTemperature = model.LlmTemperature
             };
         }
     }

@@ -414,6 +414,22 @@ namespace NzbDrone.Core.Configuration
             set { SetValue("LlmTimeout", value); }
         }
 
+        public int LlmMaxTokens
+        {
+            get { return GetValueInt("LlmMaxTokens", 0); }
+            set { SetValue("LlmMaxTokens", value); }
+        }
+
+        public double LlmTemperature
+        {
+            get
+            {
+                var raw = GetValue("LlmTemperature", "0.0");
+                return double.TryParse(raw, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var v) ? v : 0.0;
+            }
+            set { SetValue("LlmTemperature", value.ToString(System.Globalization.CultureInfo.InvariantCulture)); }
+        }
+
         public bool TrustCgnatIpAddresses
         {
             get { return GetValueBoolean("TrustCgnatIpAddresses", false); }

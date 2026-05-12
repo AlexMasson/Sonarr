@@ -168,6 +168,42 @@ function DownloadClientOptions(props) {
                     {...settings.llmTimeout}
                   />
                 </FormGroup>
+
+                <FormGroup
+                  advancedSettings={advancedSettings}
+                  isAdvanced={true}
+                  size={sizes.MEDIUM}
+                >
+                  <FormLabel>{translate('LlmMaxTokens')}</FormLabel>
+
+                  <FormInputGroup
+                    type={inputTypes.NUMBER}
+                    name="llmMaxTokens"
+                    min={0}
+                    max={4096}
+                    helpText={translate('LlmMaxTokensHelpText')}
+                    onChange={onInputChange}
+                    {...settings.llmMaxTokens}
+                  />
+                </FormGroup>
+
+                <FormGroup
+                  advancedSettings={advancedSettings}
+                  isAdvanced={true}
+                  size={sizes.MEDIUM}
+                >
+                  <FormLabel>{translate('LlmTemperature')}</FormLabel>
+
+                  <FormInputGroup
+                    type={inputTypes.NUMBER}
+                    name="llmTemperature"
+                    min={0}
+                    max={2}
+                    helpText={translate('LlmTemperatureHelpText')}
+                    onChange={onInputChange}
+                    {...settings.llmTemperature}
+                  />
+                </FormGroup>
               </Form>
 
               <Alert kind={kinds.INFO}>
