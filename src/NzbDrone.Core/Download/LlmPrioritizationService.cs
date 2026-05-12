@@ -1,8 +1,10 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Net.Http;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
@@ -28,6 +30,7 @@ namespace NzbDrone.Core.Download
         private readonly IQualityProfileService _qualityProfileService;
         private readonly IHttpClient _httpClient;
         private readonly Logger _logger;
+        private readonly ConcurrentDictionary<string, (int? choice, DateTime expiry)> _cache = new ConcurrentDictionary<string, (int? choice, DateTime expiry)>();
 
         public LlmPrioritizationService(IConfigService configService, IQualityProfileService qualityProfileService, IHttpClient httpClient, Logger logger)
         {
@@ -56,6 +59,8 @@ namespace NzbDrone.Core.Download
                 var apiKey = _configService.LlmApiKey;
                 var model = _configService.LlmModel;
                 var timeout = _configService.LlmTimeout;
+                var maxTokens = _configService.LlmMaxTokens;
+                var temperature = _configService.LlmTemperature;
 
                 var firstDecision = sorted.First();
                 var series = firstDecision.RemoteEpisode.Series;
@@ -70,16 +75,42 @@ namespace NzbDrone.Core.Download
 
                 var prompt = BuildPrompt(series, episodes, sorted);
 
-                var payload = new
+                var cacheKey = ComputeCacheKey(model, systemPrompt, prompt);
+                if (_cache.TryGetValue(cacheKey, out var cached) && cached.expiry > DateTime.UtcNow)
                 {
-                    model = model,
-                    messages = new[]
+                    _logger.Debug("LLM cache hit for '{0}', reusing choice", series.Title);
+                    if (!cached.choice.HasValue)
+                    {
+                        return sorted;
+                    }
+
+                    if (cached.choice.Value == 0)
+                    {
+                        _logger.Info("LLM (cached) declined all releases for '{0}', skipping download", series.Title);
+                        return new List<DownloadDecision>();
+                    }
+
+                    var cachedSelected = sorted[cached.choice.Value - 1];
+                    var cachedReordered = new List<DownloadDecision> { cachedSelected };
+                    cachedReordered.AddRange(sorted.Where(d => d != cachedSelected));
+                    return cachedReordered;
+                }
+
+                var payload = new Dictionary<string, object>
+                {
+                    ["model"] = model,
+                    ["messages"] = new[]
                     {
                         new { role = "system", content = systemPrompt },
                         new { role = "user", content = prompt }
                     },
-                    temperature = 0.0
+                    ["temperature"] = temperature
                 };
+
+                if (maxTokens > 0)
+                {
+                    payload["max_tokens"] = maxTokens;
+                }
 
                 _logger.Debug("LLM sending request for '{0}' (profile prompt: {1} chars, user prompt: {2} chars)",
                     series.Title, systemPrompt.Length, prompt.Length);
@@ -103,6 +134,8 @@ namespace NzbDrone.Core.Download
                 var response = await _httpClient.ExecuteAsync(request);
                 _logger.Debug("LLM raw response: {0}", response.Content);
                 var choice = ParseChoice(response.Content, sorted.Count);
+
+                _cache[cacheKey] = (choice, DateTime.UtcNow.AddMinutes(5));
 
                 if (choice.HasValue)
                 {
@@ -128,6 +161,14 @@ namespace NzbDrone.Core.Download
                 _logger.Warn(ex, "LLM prioritization failed, using default priority");
                 return sorted;
             }
+        }
+
+        private static string ComputeCacheKey(string model, string systemPrompt, string userPrompt)
+        {
+            var raw = model + "|" + systemPrompt + "|" + userPrompt;
+            using var sha = SHA256.Create();
+            var hash = sha.ComputeHash(Encoding.UTF8.GetBytes(raw));
+            return Convert.ToHexString(hash);
         }
 
         private string GetSystemPromptForProfile(int qualityProfileId)
