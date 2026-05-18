@@ -147,7 +147,7 @@ namespace NzbDrone.Core.Download
                 request.SetContent(payload.ToJson());
                 request.RequestTimeout = TimeSpan.FromSeconds(timeout);
 
-                var response = await _httpClient.ExecuteAsync(request);
+                var response = await ExecuteWithRetryAsync(request);
                 _logger.Debug("LLM raw response: {0}", response.Content);
                 var choice = ParseChoice(response.Content, sorted.Count);
 
@@ -176,6 +176,57 @@ namespace NzbDrone.Core.Download
             {
                 _logger.Warn(ex, "LLM prioritization failed, using default priority");
                 return sorted;
+            }
+        }
+
+        private async Task<HttpResponse> ExecuteWithRetryAsync(HttpRequest request)
+        {
+            // 3 attempts total (initial + 2 retries) with exponential backoff: 1s, 2s.
+            // Retries are limited to transient failures: 429, 404, 5xx, network errors, per-request timeouts.
+            // Per-attempt timeout is request.RequestTimeout (LlmTimeout); we do not enforce a global deadline.
+            const int maxAttempts = 3;
+            var backoffs = new[] { TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(2) };
+
+            for (var attempt = 1; ; attempt++)
+            {
+                try
+                {
+                    return await _httpClient.ExecuteAsync(request);
+                }
+                catch (Exception ex) when (attempt < maxAttempts && IsTransient(ex, out var retryAfter))
+                {
+                    var delay = retryAfter ?? backoffs[attempt - 1];
+                    if (delay > TimeSpan.FromSeconds(10))
+                    {
+                        _logger.Debug("LLM transient error '{0}' but Retry-After {1:F1}s > 10s, giving up", ex.GetType().Name, delay.TotalSeconds);
+                        throw;
+                    }
+
+                    _logger.Debug("LLM transient error '{0}' on attempt {1}/{2}, retrying in {3:F1}s", ex.GetType().Name, attempt, maxAttempts, delay.TotalSeconds);
+                    await Task.Delay(delay);
+                }
+            }
+        }
+
+        private static bool IsTransient(Exception ex, out TimeSpan? retryAfter)
+        {
+            retryAfter = null;
+
+            switch (ex)
+            {
+                case TooManyRequestsException tooMany:
+                    retryAfter = tooMany.RetryAfter > TimeSpan.Zero ? (TimeSpan?)tooMany.RetryAfter : null;
+                    return true;
+                case HttpException http when http.Response != null:
+                    var code = (int)http.Response.StatusCode;
+                    return code == 404 || code == 408 || code == 425 || (code >= 500 && code <= 599);
+                case HttpRequestException _:
+                case TaskCanceledException _:
+                case OperationCanceledException _:
+                case IOException _:
+                    return true;
+                default:
+                    return false;
             }
         }
 
