@@ -54,6 +54,18 @@ namespace NzbDrone.Core.Download
                 return sorted;
             }
 
+            // Delay profile / temporary rejection optimization:
+            // if EVERY candidate is going to be deferred (delay profile not elapsed,
+            // download client unavailable, etc.), the LLM ordering is discarded
+            // anyway — they all end up in PendingReleases and will be re-evaluated
+            // on the next RSS sync (with the full union of pending + new releases).
+            // Skip the LLM call to avoid burning tokens on a decision that won't grab.
+            if (sorted.All(d => d.TemporarilyRejected))
+            {
+                _logger.Debug("All {0} candidates are temporarily rejected (delay profile / unavailable client), skipping LLM call", sorted.Count);
+                return sorted;
+            }
+
             try
             {
                 var apiKeys = SplitConfig(_configService.LlmApiKey);
