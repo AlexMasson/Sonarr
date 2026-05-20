@@ -390,22 +390,26 @@ namespace NzbDrone.Core.Configuration
 
         public string ApplicationUrl => GetValue("ApplicationUrl", string.Empty);
 
+        // URL/Key/Model are sourced exclusively from environment variables
+        // (Sonarr__Llm__ApiUrl / Sonarr__Llm__ApiKey / Sonarr__Llm__Model).
+        // CSV (comma-separated) values are supported for N-provider cascade.
+        // Setters are intentional no-ops so UI saves cannot override env config.
         public string LlmApiUrl
         {
-            get { return GetValue("LlmApiUrl", string.Empty); }
-            set { SetValue("LlmApiUrl", value); }
+            get { return Environment.GetEnvironmentVariable("Sonarr__Llm__ApiUrl") ?? string.Empty; }
+            set { }
         }
 
         public string LlmApiKey
         {
-            get { return GetValue("LlmApiKey", string.Empty); }
-            set { SetValue("LlmApiKey", value); }
+            get { return Environment.GetEnvironmentVariable("Sonarr__Llm__ApiKey") ?? string.Empty; }
+            set { }
         }
 
         public string LlmModel
         {
-            get { return GetValue("LlmModel", string.Empty); }
-            set { SetValue("LlmModel", value); }
+            get { return Environment.GetEnvironmentVariable("Sonarr__Llm__Model") ?? string.Empty; }
+            set { }
         }
 
         public int LlmTimeout

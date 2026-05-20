@@ -14,14 +14,13 @@ namespace Sonarr.Api.V3.Config
         public bool AutoRedownloadFailedFromInteractiveSearch { get; set; }
 
         // LLM Prioritization
-        public string LlmApiUrl { get; set; }
-        public string LlmApiKey { get; set; }
-        public string LlmModel { get; set; }
+        // Url/Key/Model are sourced exclusively from env vars (see ConfigService) and exposed
+        // only via the derived read-only LlmProviders list below.
         public int LlmTimeout { get; set; }
         public int LlmMaxTokens { get; set; }
         public double LlmTemperature { get; set; }
 
-        // Derived, read-only: parsed list of providers (from CSV configs)
+        // Derived, read-only: parsed list of providers (from CSV env vars)
         // Ignored on save (no matching key in IConfigService).
         public List<LlmProviderInfo> LlmProviders { get; set; }
     }
@@ -46,10 +45,7 @@ namespace Sonarr.Api.V3.Config
                 AutoRedownloadFailed = model.AutoRedownloadFailed,
                 AutoRedownloadFailedFromInteractiveSearch = model.AutoRedownloadFailedFromInteractiveSearch,
 
-                // LLM Prioritization
-                LlmApiUrl = model.LlmApiUrl,
-                LlmApiKey = model.LlmApiKey,
-                LlmModel = model.LlmModel,
+                // LLM Prioritization (Url/Key/Model are env-only)
                 LlmTimeout = model.LlmTimeout,
                 LlmMaxTokens = model.LlmMaxTokens,
                 LlmTemperature = model.LlmTemperature,
