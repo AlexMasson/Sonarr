@@ -42,9 +42,9 @@ namespace NzbDrone.Core.Download
 
         public async Task<List<DownloadDecision>> ApplyAsync(List<DownloadDecision> sorted)
         {
-            var url = _configService.LlmApiUrl;
+            var urls = SplitConfig(_configService.LlmApiUrl);
 
-            if (url.IsNullOrWhiteSpace())
+            if (urls.Count == 0)
             {
                 return sorted;
             }
@@ -56,8 +56,8 @@ namespace NzbDrone.Core.Download
 
             try
             {
-                var apiKey = _configService.LlmApiKey;
-                var model = _configService.LlmModel;
+                var apiKeys = SplitConfig(_configService.LlmApiKey);
+                var models = SplitConfig(_configService.LlmModel);
                 var timeout = _configService.LlmTimeout;
                 var maxTokens = _configService.LlmMaxTokens;
                 var temperature = _configService.LlmTemperature;
@@ -75,7 +75,7 @@ namespace NzbDrone.Core.Download
 
                 var prompt = BuildPrompt(series, episodes, sorted);
 
-                var cacheKey = ComputeCacheKey(model, systemPrompt, prompt);
+                var cacheKey = ComputeCacheKey(systemPrompt, prompt);
                 if (_cache.TryGetValue(cacheKey, out var cached) && cached.expiry > DateTime.UtcNow)
                 {
                     _logger.Debug("LLM cache hit for '{0}', reusing choice", series.Title);
@@ -96,87 +96,158 @@ namespace NzbDrone.Core.Download
                     return cachedReordered;
                 }
 
-                var payload = new Dictionary<string, object>
-                {
-                    ["model"] = model,
-                    ["messages"] = new[]
-                    {
-                        new { role = "system", content = systemPrompt },
-                        new { role = "user", content = prompt }
-                    },
-                    ["temperature"] = temperature,
-                    ["response_format"] = new
-                    {
-                        type = "json_schema",
-                        json_schema = new
-                        {
-                            name = "release_choice",
-                            strict = true,
-                            schema = new
-                            {
-                                type = "object",
-                                properties = new { choice = new { type = "integer" } },
-                                required = new[] { "choice" },
-                                additionalProperties = false
-                            }
-                        }
-                    }
-                };
-
-                if (maxTokens > 0)
-                {
-                    payload["max_tokens"] = maxTokens;
-                }
-
-                _logger.Debug("LLM sending request for '{0}' (profile prompt: {1} chars, user prompt: {2} chars)",
-                    series.Title, systemPrompt.Length, prompt.Length);
+                _logger.Debug("LLM dispatching to {0} provider(s) for '{1}' (system prompt: {2} chars, user prompt: {3} chars)",
+                    urls.Count, series.Title, systemPrompt.Length, prompt.Length);
                 _logger.Debug("LLM user prompt:\n{0}", prompt);
 
-                var request = new HttpRequestBuilder($"{url.TrimEnd('/')}/chat/completions")
-                    .Accept(HttpAccept.Json)
-                    .Build();
+                var choice = await TryProvidersAsync(urls, apiKeys, models, systemPrompt, prompt, sorted.Count, series.Title, timeout, maxTokens, temperature);
 
-                request.Method = HttpMethod.Post;
-                request.Headers.ContentType = "application/json";
-
-                if (apiKey.IsNotNullOrWhiteSpace())
+                if (!choice.HasValue)
                 {
-                    request.Headers.Add("Authorization", $"Bearer {apiKey}");
+                    _logger.Warn("LLM all {0} provider(s) failed or returned unparseable responses for '{1}', using default priority", urls.Count, series.Title);
+                    return sorted;
                 }
-
-                request.SetContent(payload.ToJson());
-                request.RequestTimeout = TimeSpan.FromSeconds(timeout);
-
-                var response = await ExecuteWithRetryAsync(request);
-                _logger.Debug("LLM raw response: {0}", response.Content);
-                var choice = ParseChoice(response.Content, sorted.Count);
 
                 _cache[cacheKey] = (choice, DateTime.UtcNow.AddMinutes(5));
 
-                if (choice.HasValue)
+                if (choice.Value == 0)
                 {
-                    if (choice.Value == 0)
-                    {
-                        _logger.Info("LLM declined all releases (choice: 0) for '{0}', skipping download", series.Title);
-                        return new List<DownloadDecision>();
-                    }
-
-                    var selected = sorted[choice.Value - 1];
-                    _logger.Info("LLM selected release #{0}: {1}", choice.Value, selected.RemoteEpisode.Release.Title);
-
-                    var reordered = new List<DownloadDecision> { selected };
-                    reordered.AddRange(sorted.Where(d => d != selected));
-                    return reordered;
+                    _logger.Info("LLM declined all releases (choice: 0) for '{0}', skipping download", series.Title);
+                    return new List<DownloadDecision>();
                 }
 
-                _logger.Warn("LLM response could not be parsed, using default priority");
-                return sorted;
+                var selected = sorted[choice.Value - 1];
+                _logger.Info("LLM selected release #{0}: {1}", choice.Value, selected.RemoteEpisode.Release.Title);
+
+                var reordered = new List<DownloadDecision> { selected };
+                reordered.AddRange(sorted.Where(d => d != selected));
+                return reordered;
             }
             catch (Exception ex)
             {
                 _logger.Warn(ex, "LLM prioritization failed, using default priority");
                 return sorted;
             }
+        }
+
+        private async Task<int?> TryProvidersAsync(
+            IReadOnlyList<string> urls,
+            IReadOnlyList<string> apiKeys,
+            IReadOnlyList<string> models,
+            string systemPrompt,
+            string userPrompt,
+            int releaseCount,
+            string itemTitle,
+            int timeoutSec,
+            int maxTokens,
+            double temperature)
+        {
+            for (var i = 0; i < urls.Count; i++)
+            {
+                var url = urls[i];
+                var apiKey = i < apiKeys.Count ? apiKeys[i] : string.Empty;
+                var model = i < models.Count ? models[i] : string.Empty;
+                var providerLabel = $"#{i + 1} ({url}, model={model})";
+
+                try
+                {
+                    _logger.Debug("LLM provider {0} sending request for '{1}'", providerLabel, itemTitle);
+                    var response = await CallProviderAsync(url, apiKey, model, systemPrompt, userPrompt, timeoutSec, maxTokens, temperature);
+                    _logger.Debug("LLM provider {0} raw response: {1}", providerLabel, response.Content);
+                    var choice = ParseChoice(response.Content, releaseCount);
+
+                    if (choice.HasValue)
+                    {
+                        if (i > 0)
+                        {
+                            _logger.Info("LLM fallback succeeded for '{0}' with provider {1}", itemTitle, providerLabel);
+                        }
+
+                        return choice;
+                    }
+
+                    _logger.Warn("LLM provider {0} returned unparseable response for '{1}', trying next provider", providerLabel, itemTitle);
+                }
+                catch (Exception ex)
+                {
+                    _logger.Warn("LLM provider {0} failed for '{1}': {2} ({3}). Trying next provider.", providerLabel, itemTitle, ex.GetType().Name, ex.Message);
+                }
+            }
+
+            return null;
+        }
+
+        private Task<HttpResponse> CallProviderAsync(
+            string url,
+            string apiKey,
+            string model,
+            string systemPrompt,
+            string userPrompt,
+            int timeoutSec,
+            int maxTokens,
+            double temperature)
+        {
+            var payload = new Dictionary<string, object>
+            {
+                ["model"] = model,
+                ["messages"] = new[]
+                {
+                    new { role = "system", content = systemPrompt },
+                    new { role = "user", content = userPrompt }
+                },
+                ["temperature"] = temperature,
+                ["response_format"] = new
+                {
+                    type = "json_schema",
+                    json_schema = new
+                    {
+                        name = "release_choice",
+                        strict = true,
+                        schema = new
+                        {
+                            type = "object",
+                            properties = new { choice = new { type = "integer" } },
+                            required = new[] { "choice" },
+                            additionalProperties = false
+                        }
+                    }
+                }
+            };
+
+            if (maxTokens > 0)
+            {
+                payload["max_tokens"] = maxTokens;
+            }
+
+            var request = new HttpRequestBuilder($"{url.TrimEnd('/')}/chat/completions")
+                .Accept(HttpAccept.Json)
+                .Build();
+
+            request.Method = HttpMethod.Post;
+            request.Headers.ContentType = "application/json";
+
+            if (apiKey.IsNotNullOrWhiteSpace())
+            {
+                request.Headers.Add("Authorization", $"Bearer {apiKey}");
+            }
+
+            request.SetContent(payload.ToJson());
+            request.RequestTimeout = TimeSpan.FromSeconds(timeoutSec);
+
+            return ExecuteWithRetryAsync(request);
+        }
+
+        private static List<string> SplitConfig(string raw)
+        {
+            if (raw.IsNullOrWhiteSpace())
+            {
+                return new List<string>();
+            }
+
+            return raw.Split(',')
+                .Select(s => s.Trim())
+                .Where(s => s.Length > 0)
+                .ToList();
         }
 
         private async Task<HttpResponse> ExecuteWithRetryAsync(HttpRequest request)
@@ -198,11 +269,11 @@ namespace NzbDrone.Core.Download
                     var delay = retryAfter ?? backoffs[attempt - 1];
                     if (delay > TimeSpan.FromSeconds(10))
                     {
-                        _logger.Debug("LLM transient error '{0}' but Retry-After {1:F1}s > 10s, giving up", ex.GetType().Name, delay.TotalSeconds);
+                        _logger.Warn("LLM transient error '{0}' but Retry-After {1:F1}s > 10s, giving up", ex.GetType().Name, delay.TotalSeconds);
                         throw;
                     }
 
-                    _logger.Debug("LLM transient error '{0}' on attempt {1}/{2}, retrying in {3:F1}s", ex.GetType().Name, attempt, maxAttempts, delay.TotalSeconds);
+                    _logger.Warn("LLM transient error '{0}' on attempt {1}/{2}, retrying in {3:F1}s", ex.GetType().Name, attempt, maxAttempts, delay.TotalSeconds);
                     await Task.Delay(delay);
                 }
             }
@@ -230,9 +301,9 @@ namespace NzbDrone.Core.Download
             }
         }
 
-        private static string ComputeCacheKey(string model, string systemPrompt, string userPrompt)
+        private static string ComputeCacheKey(string systemPrompt, string userPrompt)
         {
-            var raw = model + "|" + systemPrompt + "|" + userPrompt;
+            var raw = systemPrompt + "|" + userPrompt;
             using var sha = SHA256.Create();
             var hash = sha.ComputeHash(Encoding.UTF8.GetBytes(raw));
             return Convert.ToHexString(hash);
