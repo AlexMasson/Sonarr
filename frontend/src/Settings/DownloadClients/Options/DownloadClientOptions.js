@@ -99,6 +99,23 @@ function DownloadClientOptions(props) {
             </FieldSet>
 
             <FieldSet legend={translate('LlmPrioritization')}>
+              <Alert kind={kinds.INFO}>
+                <div style={{ fontWeight: 'bold', marginBottom: 4 }}>
+                  {translate('LlmConfiguredProviders')}
+                </div>
+                {
+                  settings.llmProviders && settings.llmProviders.value && settings.llmProviders.value.length > 0 ?
+                    <ol style={{ paddingLeft: 20, marginTop: 4, marginBottom: 0 }}>
+                      {settings.llmProviders.value.map((p) => (
+                        <li key={p.index}>
+                          <code>{p.url}</code> &mdash; model: <code>{p.model || '?'}</code> &mdash; {p.hasApiKey ? 'auth: yes' : 'auth: no'}
+                        </li>
+                      ))}
+                    </ol> :
+                    <div>{translate('LlmNoProvidersConfigured')}</div>
+                }
+              </Alert>
+
               <Form>
                 <FormGroup
                   advancedSettings={advancedSettings}
