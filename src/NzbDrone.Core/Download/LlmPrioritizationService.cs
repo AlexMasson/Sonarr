@@ -44,102 +44,139 @@ namespace NzbDrone.Core.Download
         {
             var urls = SplitConfig(_configService.LlmApiUrl);
 
-            if (urls.Count == 0)
+            if (urls.Count == 0 || sorted.Count <= 1)
             {
                 return sorted;
             }
 
-            if (sorted.Count <= 1)
+            // RSS sync sends decisions for ALL episodes/series in one batch. Group them by
+            // (series, episode-set) so each LLM call has a coherent prompt (one item + its
+            // competing releases) and cache keys are per-item — an unchanged release list
+            // for an episode = cache hit = no API call, regardless of other items.
+            var groupOrder = new List<string>();
+            var groups = new Dictionary<string, List<DownloadDecision>>();
+
+            foreach (var d in sorted)
             {
-                return sorted;
+                var key = BuildGroupKey(d);
+                if (!groups.TryGetValue(key, out var list))
+                {
+                    list = new List<DownloadDecision>();
+                    groups[key] = list;
+                    groupOrder.Add(key);
+                }
+
+                list.Add(d);
             }
 
-            // Delay profile / temporary rejection optimization:
-            // if EVERY candidate is going to be deferred (delay profile not elapsed,
-            // download client unavailable, etc.), the LLM ordering is discarded
-            // anyway — they all end up in PendingReleases and will be re-evaluated
-            // on the next RSS sync (with the full union of pending + new releases).
-            // Skip the LLM call to avoid burning tokens on a decision that won't grab.
-            if (sorted.All(d => d.TemporarilyRejected))
+            var apiKeys = SplitConfig(_configService.LlmApiKey);
+            var models = SplitConfig(_configService.LlmModel);
+            var timeout = _configService.LlmTimeout;
+            var maxTokens = _configService.LlmMaxTokens;
+            var temperature = _configService.LlmTemperature;
+
+            var result = new List<DownloadDecision>(sorted.Count);
+
+            foreach (var key in groupOrder)
             {
-                _logger.Debug("All {0} candidates are temporarily rejected (delay profile / unavailable client), skipping LLM call", sorted.Count);
-                return sorted;
+                var ranked = await RankGroupAsync(groups[key], urls, apiKeys, models, timeout, maxTokens, temperature);
+                result.AddRange(ranked);
             }
+
+            return result;
+        }
+
+        private static string BuildGroupKey(DownloadDecision d)
+        {
+            var re = d.RemoteEpisode;
+            var seriesId = re.Series?.Id ?? 0;
+            var episodeIds = re.Episodes != null
+                ? string.Join(",", re.Episodes.Select(e => e.Id).OrderBy(x => x))
+                : string.Empty;
+            return seriesId + ":" + episodeIds;
+        }
+
+        private async Task<List<DownloadDecision>> RankGroupAsync(
+            List<DownloadDecision> group,
+            IReadOnlyList<string> urls,
+            IReadOnlyList<string> apiKeys,
+            IReadOnlyList<string> models,
+            int timeout,
+            int maxTokens,
+            double temperature)
+        {
+            if (group.Count <= 1)
+            {
+                return group;
+            }
+
+            var firstDecision = group.First();
+            var series = firstDecision.RemoteEpisode.Series;
+            var episodes = firstDecision.RemoteEpisode.Episodes;
 
             try
             {
-                var apiKeys = SplitConfig(_configService.LlmApiKey);
-                var models = SplitConfig(_configService.LlmModel);
-                var timeout = _configService.LlmTimeout;
-                var maxTokens = _configService.LlmMaxTokens;
-                var temperature = _configService.LlmTemperature;
-
-                var firstDecision = sorted.First();
-                var series = firstDecision.RemoteEpisode.Series;
-                var episodes = firstDecision.RemoteEpisode.Episodes;
-
                 var systemPrompt = GetSystemPromptForProfile(series.QualityProfileId);
 
                 if (systemPrompt.IsNullOrWhiteSpace())
                 {
-                    return sorted;
+                    return group;
                 }
 
-                var prompt = BuildPrompt(series, episodes, sorted);
-
+                var prompt = BuildPrompt(series, episodes, group);
                 var cacheKey = ComputeCacheKey(systemPrompt, prompt);
+
                 if (_cache.TryGetValue(cacheKey, out var cached) && cached.expiry > DateTime.UtcNow)
                 {
                     _logger.Debug("LLM cache hit for '{0}', reusing choice", series.Title);
-                    if (!cached.choice.HasValue)
-                    {
-                        return sorted;
-                    }
-
-                    if (cached.choice.Value == 0)
-                    {
-                        _logger.Info("LLM (cached) declined all releases for '{0}', skipping download", series.Title);
-                        return new List<DownloadDecision>();
-                    }
-
-                    var cachedSelected = sorted[cached.choice.Value - 1];
-                    var cachedReordered = new List<DownloadDecision> { cachedSelected };
-                    cachedReordered.AddRange(sorted.Where(d => d != cachedSelected));
-                    return cachedReordered;
+                    return ApplyChoice(group, cached.choice, series.Title, fromCache: true);
                 }
 
                 _logger.Debug("LLM dispatching to {0} provider(s) for '{1}' (system prompt: {2} chars, user prompt: {3} chars)",
                     urls.Count, series.Title, systemPrompt.Length, prompt.Length);
                 _logger.Debug("LLM user prompt:\n{0}", prompt);
 
-                var choice = await TryProvidersAsync(urls, apiKeys, models, systemPrompt, prompt, sorted.Count, series.Title, timeout, maxTokens, temperature);
+                var choice = await TryProvidersAsync(urls, apiKeys, models, systemPrompt, prompt, group.Count, series.Title, timeout, maxTokens, temperature);
 
                 if (!choice.HasValue)
                 {
                     _logger.Warn("LLM all {0} provider(s) failed or returned unparseable responses for '{1}', using default priority", urls.Count, series.Title);
-                    return sorted;
+                    return group;
                 }
 
-                _cache[cacheKey] = (choice, DateTime.UtcNow.AddMinutes(5));
+                _cache[cacheKey] = (choice, DateTime.UtcNow.AddMinutes(60));
 
-                if (choice.Value == 0)
-                {
-                    _logger.Info("LLM declined all releases (choice: 0) for '{0}', skipping download", series.Title);
-                    return new List<DownloadDecision>();
-                }
-
-                var selected = sorted[choice.Value - 1];
-                _logger.Info("LLM selected release #{0}: {1}", choice.Value, selected.RemoteEpisode.Release.Title);
-
-                var reordered = new List<DownloadDecision> { selected };
-                reordered.AddRange(sorted.Where(d => d != selected));
-                return reordered;
+                return ApplyChoice(group, choice, series.Title, fromCache: false);
             }
             catch (Exception ex)
             {
-                _logger.Warn(ex, "LLM prioritization failed, using default priority");
-                return sorted;
+                _logger.Warn(ex, "LLM prioritization failed for '{0}', using default priority", series.Title);
+                return group;
             }
+        }
+
+        private List<DownloadDecision> ApplyChoice(List<DownloadDecision> group, int? choice, string itemTitle, bool fromCache)
+        {
+            if (!choice.HasValue)
+            {
+                return group;
+            }
+
+            if (choice.Value == 0)
+            {
+                _logger.Info("LLM {0}declined all releases for '{1}', skipping", fromCache ? "(cached) " : string.Empty, itemTitle);
+                return new List<DownloadDecision>();
+            }
+
+            var selected = group[choice.Value - 1];
+            if (!fromCache)
+            {
+                _logger.Info("LLM selected release #{0} for '{1}': {2}", choice.Value, itemTitle, selected.RemoteEpisode.Release.Title);
+            }
+
+            var reordered = new List<DownloadDecision>(group.Count) { selected };
+            reordered.AddRange(group.Where(d => d != selected));
+            return reordered;
         }
 
         private async Task<int?> TryProvidersAsync(
