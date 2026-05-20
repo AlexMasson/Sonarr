@@ -49,10 +49,19 @@ namespace NzbDrone.Core.Download
                 return sorted;
             }
 
-            // RSS sync sends decisions for ALL episodes/series in one batch. Group them by
-            // (series, episode-set) so each LLM call has a coherent prompt (one item + its
-            // competing releases) and cache keys are per-item — an unchanged release list
-            // for an episode = cache hit = no API call, regardless of other items.
+            // Group decisions per (series, season-set) so each LLM call has a coherent prompt:
+            // - Single-episode search: Sonarr already rejects season packs upstream
+            //   (SingleEpisodeSearchMatchSpecification -> FullSeason), so the group only
+            //   contains single-episode releases for that one episode.
+            // - Season search: individual episode releases AND the season pack are all
+            //   accepted by SeasonMatchSpecification, so they land in the same group and
+            //   the LLM compares pack vs splits together.
+            // - Series search: one LLM call per season; each season's candidates (packs +
+            //   individual eps) are ranked independently.
+            // - RSS sync (mixed series/seasons): one call per (series, season). Packs and
+            //   single-ep releases can coexist here too.
+            // Cache keys are per-group, so an unchanged release list for one season = cache
+            // hit = no API call, regardless of activity on other seasons/series.
             var groupOrder = new List<string>();
             var groups = new Dictionary<string, List<DownloadDecision>>();
 
@@ -90,10 +99,13 @@ namespace NzbDrone.Core.Download
         {
             var re = d.RemoteEpisode;
             var seriesId = re.Series?.Id ?? 0;
-            var episodeIds = re.Episodes != null
-                ? string.Join(",", re.Episodes.Select(e => e.Id).OrderBy(x => x))
+            // Group by distinct season numbers the release covers. A single-episode release
+            // (S01E05) and a season pack (S01 COMPLETE) both map to "<id>:1" and are ranked
+            // together. A full-series pack (covers S01..S05) lands in its own group "<id>:1,2,3,4,5".
+            var seasons = re.Episodes != null && re.Episodes.Count > 0
+                ? string.Join(",", re.Episodes.Select(e => e.SeasonNumber).Distinct().OrderBy(x => x))
                 : string.Empty;
-            return seriesId + ":" + episodeIds;
+            return seriesId + ":" + seasons;
         }
 
         private async Task<List<DownloadDecision>> RankGroupAsync(
@@ -112,7 +124,22 @@ namespace NzbDrone.Core.Download
 
             var firstDecision = group.First();
             var series = firstDecision.RemoteEpisode.Series;
-            var episodes = firstDecision.RemoteEpisode.Episodes;
+
+            // Union of episodes covered by ANY release in this group. Used for the prompt
+            // scope header (so the LLM knows what season(s) this group spans) and for
+            // de-duplicating across releases that overlap (e.g. season pack + single ep).
+            var allEpisodes = group
+                .SelectMany(d => d.RemoteEpisode.Episodes ?? Enumerable.Empty<Tv.Episode>())
+                .GroupBy(e => e.Id)
+                .Select(g => g.First())
+                .OrderBy(e => e.SeasonNumber).ThenBy(e => e.EpisodeNumber)
+                .ToList();
+
+            var seasons = allEpisodes.Select(e => e.SeasonNumber).Distinct().OrderBy(x => x).ToList();
+            var seasonLabel = seasons.Count == 1
+                ? $"Season {seasons[0]:D2}"
+                : "Seasons " + string.Join(", ", seasons.Select(s => s.ToString("D2")));
+            var itemTitle = $"{series.Title} - {seasonLabel}";
 
             try
             {
@@ -123,34 +150,34 @@ namespace NzbDrone.Core.Download
                     return group;
                 }
 
-                var prompt = BuildPrompt(series, episodes, group);
+                var prompt = BuildPrompt(series, allEpisodes, group);
                 var cacheKey = ComputeCacheKey(systemPrompt, prompt);
 
                 if (_cache.TryGetValue(cacheKey, out var cached) && cached.expiry > DateTime.UtcNow)
                 {
-                    _logger.Debug("LLM cache hit for '{0}', reusing choice", series.Title);
-                    return ApplyChoice(group, cached.choice, series.Title, fromCache: true);
+                    _logger.Debug("LLM cache hit for '{0}', reusing choice", itemTitle);
+                    return ApplyChoice(group, cached.choice, itemTitle, fromCache: true);
                 }
 
                 _logger.Debug("LLM dispatching to {0} provider(s) for '{1}' (system prompt: {2} chars, user prompt: {3} chars)",
-                    urls.Count, series.Title, systemPrompt.Length, prompt.Length);
+                    urls.Count, itemTitle, systemPrompt.Length, prompt.Length);
                 _logger.Debug("LLM user prompt:\n{0}", prompt);
 
-                var choice = await TryProvidersAsync(urls, apiKeys, models, systemPrompt, prompt, group.Count, series.Title, timeout, maxTokens, temperature);
+                var choice = await TryProvidersAsync(urls, apiKeys, models, systemPrompt, prompt, group.Count, itemTitle, timeout, maxTokens, temperature);
 
                 if (!choice.HasValue)
                 {
-                    _logger.Warn("LLM all {0} provider(s) failed or returned unparseable responses for '{1}', using default priority", urls.Count, series.Title);
+                    _logger.Warn("LLM all {0} provider(s) failed or returned unparseable responses for '{1}', using default priority", urls.Count, itemTitle);
                     return group;
                 }
 
                 _cache[cacheKey] = (choice, DateTime.UtcNow.AddMinutes(60));
 
-                return ApplyChoice(group, choice, series.Title, fromCache: false);
+                return ApplyChoice(group, choice, itemTitle, fromCache: false);
             }
             catch (Exception ex)
             {
-                _logger.Warn(ex, "LLM prioritization failed for '{0}', using default priority", series.Title);
+                _logger.Warn(ex, "LLM prioritization failed for '{0}', using default priority", itemTitle);
                 return group;
             }
         }
@@ -395,10 +422,13 @@ namespace NzbDrone.Core.Download
             var sb = new StringBuilder();
             sb.AppendLine($"Series: {series.Title}");
 
-            var episodeList = string.Join(", ", episodes.Select(e => $"S{e.SeasonNumber:D2}E{e.EpisodeNumber:D2} - {e.Title}"));
-            sb.AppendLine($"Episodes: {episodeList}");
+            var seasonNums = episodes.Select(e => e.SeasonNumber).Distinct().OrderBy(x => x).ToList();
+            var scope = seasonNums.Count == 1
+                ? $"Season {seasonNums[0]:D2}"
+                : "Seasons " + string.Join(", ", seasonNums.Select(s => s.ToString("D2")));
+            sb.AppendLine($"Scope: {scope} ({episodes.Count} episode(s) in scope)");
             sb.AppendLine();
-            sb.AppendLine("Releases (sorted by priority, #1 is top pick):");
+            sb.AppendLine("Releases (sorted by Sonarr priority, #1 is top pick). Each release may cover a single episode, a multi-episode set, a season pack, or a full-series pack:");
             sb.AppendLine();
 
             for (var i = 0; i < decisions.Count; i++)
@@ -406,6 +436,7 @@ namespace NzbDrone.Core.Download
                 var d = decisions[i];
                 var remote = d.RemoteEpisode;
                 var release = remote.Release;
+                var covers = FormatCoverage(remote.Episodes);
                 var quality = remote.ParsedEpisodeInfo?.Quality?.Quality?.Name ?? "Unknown";
                 var sizeGb = release.Size > 0 ? (release.Size / 1073741824.0).ToString("F2") : "?";
                 var seeders = TorrentInfo.GetSeeders(release)?.ToString() ?? "N/A";
@@ -420,12 +451,47 @@ namespace NzbDrone.Core.Download
                 var ageMinutes = release.AgeMinutes.ToString("F0");
 
                 sb.AppendLine($"#{i + 1}: {release.Title}");
+                sb.AppendLine($"  Covers: {covers}");
                 sb.AppendLine($"  Quality: {quality} | Size: {sizeGb} GB | Seeders: {seeders} | Score: {customFormatScore}");
                 sb.AppendLine($"  Formats: {customFormats} | Languages: {languages}");
                 sb.AppendLine($"  Flags: {indexerFlags} | Age: {ageMinutes} min");
             }
 
             return sb.ToString();
+        }
+
+        private static string FormatCoverage(List<Tv.Episode> episodes)
+        {
+            if (episodes == null || episodes.Count == 0)
+            {
+                return "Unknown";
+            }
+
+            if (episodes.Count == 1)
+            {
+                var e = episodes[0];
+                return $"S{e.SeasonNumber:D2}E{e.EpisodeNumber:D2} ({e.Title})";
+            }
+
+            // Multi-episode: collapse per season into Sxx E01-E10 form.
+            var bySeason = episodes
+                .GroupBy(e => e.SeasonNumber)
+                .OrderBy(g => g.Key);
+
+            var parts = bySeason.Select(g =>
+            {
+                var nums = g.Select(e => e.EpisodeNumber).OrderBy(n => n).ToList();
+                var first = nums.First();
+                var last = nums.Last();
+                var contiguous = nums.Count == (last - first + 1);
+                if (contiguous && nums.Count > 1)
+                {
+                    return $"S{g.Key:D2}E{first:D2}-E{last:D2} ({nums.Count} eps)";
+                }
+                return $"S{g.Key:D2} {string.Join(",", nums.Select(n => $"E{n:D2}"))}";
+            });
+
+            return string.Join("; ", parts);
         }
 
         private int? ParseChoice(string content, int count)
