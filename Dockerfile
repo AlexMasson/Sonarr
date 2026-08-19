@@ -34,6 +34,13 @@ RUN --mount=type=cache,id=sonarr-nuget,target=/root/.nuget/packages \
       /p:TreatWarningsAsErrors=false && \
     mkdir /build && \
     cp -r /src/_output/net6.0/linux-musl-x64/publish/* /build/ && \
+    # PublishAllRids laisse l'assembly inbox du runtime pack net6 (6.0.0.0)
+    # écraser le package NuGet dans le publish : dès qu'upstream référence une
+    # version plus récente (CodePages 8.0.0 depuis juin 2026), Sonarr crash au
+    # boot (FileLoadException). On force la DLL du package déclaré ; échec
+    # volontaire du build si la référence disparaît du csproj un jour.
+    CP_VER=$(grep -oE 'CodePages" Version="[0-9.]+' NzbDrone.Host/Sonarr.Host.csproj | grep -oE '[0-9.]+$') && \
+    cp "/root/.nuget/packages/system.text.encoding.codepages/${CP_VER}/lib/net6.0/System.Text.Encoding.CodePages.dll" /build/ && \
     cp -r /src/_output/UI /build/UI && \
     cp /usr/share/dotnet/host/fxr/6*/libhostfxr.so /build/ && \
     cp /usr/share/dotnet/shared/Microsoft.NETCore.App/6*/libcoreclr.so /build/ && \
