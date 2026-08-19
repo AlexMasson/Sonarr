@@ -1,0 +1,24 @@
+# Exclude build artifacts and dependencies from Docker build context
+.git
+.github
+.vscode
+.idea
+node_modules
+**/node_modules
+_output
+_temp
+_tests
+**/bin/Debug
+**/bin/Release
+**/obj
+**/.vs
+
+# Frontend dev artifacts (NB: frontend/build/ contains webpack config, NOT build output)
+*.log
+
+# OS / editor
+.DS_Store
+Thumbs.db
+
+# Don't include the docker-root files in the frontend stage (only stage 3 needs them via COPY)
+# (docker-root is small enough; left in context for stage 3 COPY)
